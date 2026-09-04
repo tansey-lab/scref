@@ -15,6 +15,7 @@ import sys
 from typing import Dict, Optional
 
 import numpy as np
+import scipy.sparse as sp
 import scanpy as sc
 from anndata import AnnData
 from sklearn.linear_model import LogisticRegressionCV
@@ -24,40 +25,32 @@ from .exceptions import GeneSpaceError, NotFittedError
 
 DEFAULT_MIN_CELLS_PER_CLASS = 50
 
+def _normalize_to(adata: AnnData, genes: np.ndarray) -> sp.csr_matrix:
+    """log1p-normalized SPARSE matrix on the gene axis ``genes`` (that order).
 
-def _normalize_to(adata: AnnData, genes: np.ndarray) -> np.ndarray:
-    """log1p-normalized dense matrix on the gene axis ``genes`` (that order).
-
-    Genes the query lacks are zero-filled FIRST, then normalization is computed
-    over the full ``genes`` axis — so the per-cell total (the normalize_total
-    denominator) is taken over the same gene universe the classifier was
-    trained on. A gene absent from the query contributes 0 to that total,
-    exactly as if the query had measured it as zero. (Normalizing over the
-    present-only subset instead would use a different denominator than training
-    and put the scaled features on a different footing than the model learned.)
+    Genes the query lacks are zero-filled FIRST (as empty columns), then
+    normalize_total is computed over the full ``genes`` axis, so the per-cell
+    denominator matches training exactly. Stays sparse end to end -- the caller's
+    StandardScaler(with_mean=False) + lbfgs both accept sparse input.
     """
-    present = [g for g in genes if g in set(adata.var_names)]
-    sub = adata[:, present].copy()
-    Xsub = sub.X
-    if hasattr(Xsub, "toarray"):
-        Xsub = Xsub.toarray()
-    Xsub = np.asarray(Xsub, dtype=float)
+    genes = np.asarray(genes)
+    var_pos = {g: i for i, g in enumerate(adata.var_names)}
+    tgt = np.array([j for j, g in enumerate(genes) if g in var_pos], dtype=np.int64)
+    src = np.array([var_pos[g] for g in genes if g in var_pos], dtype=np.int64)
 
-    # Zero-fill into the full training gene order BEFORE normalizing.
-    col = {g: i for i, g in enumerate(present)}
-    full = np.zeros((adata.n_obs, len(genes)), dtype=float)
-    for j, g in enumerate(genes):
-        if g in col:
-            full[:, j] = Xsub[:, col[g]]
+    X = adata.X
+    X = X.tocsr() if sp.issparse(X) else sp.csr_matrix(X)
+    Xsel = X[:, src].astype(np.float64)              # present cols, in `genes` order
 
-    # normalize_total + log1p over the full panel (missing genes are zeros).
+    # scatter present cols into the full panel width; missing genes are empty cols
+    P = sp.csr_matrix((np.ones(src.shape[0]), (np.arange(src.shape[0]), tgt)),
+                      shape=(src.shape[0], genes.shape[0]))
+    full = (Xsel @ P).tocsr()
+
     full_ad = AnnData(X=full)
-    sc.pp.normalize_total(full_ad, target_sum=1e4)
-    sc.pp.log1p(full_ad)
-    out = full_ad.X
-    if hasattr(out, "toarray"):
-        out = out.toarray()
-    return np.asarray(out, dtype=float)
+    sc.pp.normalize_total(full_ad, target_sum=1e4)   # per-row scale, keeps sparsity
+    sc.pp.log1p(full_ad)                             # on .data, keeps sparsity
+    return sp.csr_matrix(full_ad.X)
 
 
 class CellTypeClassifier:
