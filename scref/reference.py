@@ -446,6 +446,7 @@ class scRNAseqReference:
         self, adata: AnnData, *, group_by: Optional[str] = None,
         max_dist: float = 40.0, min_sink_cells: int = 50,
         coord_keys: Sequence[str] = _spatial.DEFAULT_COORD_KEYS,
+        sink_mask: Optional[np.ndarray] = None,
         score_panel: Optional[Sequence[str]] = None, pad_query: bool = True,
     ) -> pd.DataFrame:
         """Per-(source, sink, sink-cell) molecular-bleed scan against this
@@ -454,18 +455,24 @@ class scRNAseqReference:
         Requires the spatial coordinate columns (``coord_keys``) in obs. Returns
         the long-form scan frame WITHOUT cancer/method/version (the caller's to
         attach). ``sink_cell_row`` indexes into the scored (padded) adata.
+
+        ``sink_mask`` (boolean, aligned to ``adata`` cell order) restricts the
+        measured sink cells while keeping the full point pattern as the source
+        pool -- see ``scref.spatial.bleed_scan``. ``_prepare_spatial`` preserves
+        obs order, so a mask built on the input ``adata`` aligns with ``scored``.
         """
         scored, labels = self._prepare_spatial(adata, group_by, score_panel,
                                                pad_query, coord_keys)
         return _spatial.bleed_scan(
             scored, labels, self.markers.genes, self.wrong_genes.genes,
             max_dist=max_dist, min_sink_cells=min_sink_cells,
-            coord_keys=coord_keys)
+            coord_keys=coord_keys, sink_mask=sink_mask)
 
     def bleed_null_comparison(
         self, adata: AnnData, *, group_by: Optional[str] = None,
         max_dist: float = 40.0, min_sink_cells: int = 50,
         coord_keys: Sequence[str] = _spatial.DEFAULT_COORD_KEYS,
+        sink_mask: Optional[np.ndarray] = None,
         n_null_draws: int = 5, n_expr_bins: int = 20, seed: int = 42,
         r_grid=None,
         score_panel: Optional[Sequence[str]] = None, pad_query: bool = True,
@@ -475,13 +482,18 @@ class scRNAseqReference:
         Runs ``bleed_scan`` and the null draws on the SAME scored matrix, so the
         null's ``sink_cell_row`` indexing aligns with the scan. See
         ``scref.spatial.bleed_null_comparison``.
+
+        ``sink_mask`` is forwarded to the underlying ``bleed_scan``, so the true
+        and null curves are measured on the same masked sink population against
+        the full source pool. The null's expression-bin matching is computed over
+        the full ``scored`` matrix (applied identically to true and null).
         """
         scored, labels = self._prepare_spatial(adata, group_by, score_panel,
                                                pad_query, coord_keys)
         bleed = _spatial.bleed_scan(
             scored, labels, self.markers.genes, self.wrong_genes.genes,
             max_dist=max_dist, min_sink_cells=min_sink_cells,
-            coord_keys=coord_keys)
+            coord_keys=coord_keys, sink_mask=sink_mask)
         return _spatial.bleed_null_comparison(
             scored, bleed, self.markers.genes,
             n_null_draws=n_null_draws, n_expr_bins=n_expr_bins, seed=seed,

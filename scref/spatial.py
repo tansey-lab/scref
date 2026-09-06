@@ -53,6 +53,7 @@ def bleed_scan(
     max_dist: float = 40.0,
     min_sink_cells: int = 50,
     coord_keys: Sequence[str] = DEFAULT_COORD_KEYS,
+    sink_mask: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
     """For every (source_type, sink_type) pair, for every sink cell with a
     source-type neighbor within ``max_dist``, record its distance to the nearest
@@ -62,6 +63,19 @@ def bleed_scan(
     neighbor within ``max_dist`` are excluded for that pair (their bleed at any
     r in (0, max_dist] is zero), but they still count toward
     ``n_sink_cells_total`` -- the class-balanced denominator for per-type means.
+
+    ``sink_mask`` (optional boolean array of length ``adata.n_obs``) restricts
+    which cells may act as *sinks* (the measured cells) WITHOUT restricting the
+    *source* pool: the per-type KDTrees, and therefore every nearest-source
+    distance, are always built over the full ``adata`` point pattern. This is
+    the border / minus-sampling edge correction: when the caller has excluded a
+    boundary region from the measured window (e.g. an FOV-interior restriction),
+    passing the interior as ``sink_mask`` keeps the nearest-source search honest
+    -- a retained interior sink can still find a source that lies in the excluded
+    band -- instead of silently deleting those near-neighbors from the pool.
+    ``n_sink_cells_total`` then counts only masked (measured) sinks, so it stays
+    consistent with the class-balanced denominator. ``sink_mask=None`` (the
+    default) makes every cell sink-eligible, i.e. the original behaviour.
 
     Columns: source_type, sink_type, sink_cell_row, distance, eligible_counts,
     sink_total_tx, n_eligible_markers, n_sink_cells_total. ``sink_cell_row`` is
@@ -75,6 +89,18 @@ def bleed_scan(
     gene_to_idx = {g: i for i, g in enumerate(adata.var_names)}
     xy = _coords(adata, coord_keys)
     sink_types_arr = np.asarray(group_labels)
+
+    # Sink-eligibility mask. Sources (the KDTrees below) are ALWAYS built over
+    # the full point pattern; the mask only gates which cells are emitted as
+    # sinks and counted in n_sink_cells_total. None -> all cells eligible.
+    if sink_mask is None:
+        sink_mask = np.ones(sink_types_arr.shape[0], dtype=bool)
+    else:
+        sink_mask = np.asarray(sink_mask, dtype=bool)
+        if sink_mask.shape[0] != sink_types_arr.shape[0]:
+            raise ValueError(
+                f"sink_mask length {sink_mask.shape[0]} != n_obs "
+                f"{sink_types_arr.shape[0]}")
 
     total_per_cell = (np.asarray(X.sum(axis=1)).flatten()
                       if issparse(X) else X.sum(axis=1))
@@ -113,7 +139,11 @@ def bleed_scan(
         for sink in included_types:
             if sink == src:
                 continue
-            sink_cells_all = np.where(sink_types_arr == sink)[0]
+            # Sinks are restricted to the mask (the measured window); sources
+            # were not (trees[src] above spans the full pattern). n_sink_cells_
+            # total therefore counts only masked sinks -- the denominator the
+            # class-balanced per-type means divide by.
+            sink_cells_all = np.where((sink_types_arr == sink) & sink_mask)[0]
             if sink_cells_all.size < min_sink_cells:
                 continue
 
